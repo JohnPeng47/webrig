@@ -1,0 +1,100 @@
+{
+  "manifest_version": 3,
+  "name": "Claude (Headless)",
+  "version": "1.0.0",
+  "description": "Claude browser extension — headless MCP automation core",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "128": "icon-128.png"
+  },
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Claude (Headless)"
+  },
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "debugger",
+    "tabGroups",
+    "tabs",
+    "alarms",
+    "notifications",
+    "system.display",
+    "webNavigation",
+    "declarativeNetRequestWithHostAccess",
+    "offscreen",
+    "unlimitedStorage",
+    "cookies",
+    "downloads",
+    "nativeMessaging",
+    "identity",
+    "identity.email"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "content_scripts": [
+    {
+      "js": [
+        "content-scripts/content-script.js"
+      ],
+      "matches": [
+        "https://claude.ai/*",
+        "https://*.claude.ai/*"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "js": [
+        "content-scripts/accessibility-tree.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "js": [
+        "content-scripts/x-post-rename.js"
+      ],
+      "matches": [
+        "https://x.com/*"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "js": [
+        "content-scripts/agent-visual-indicator.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "externally_connectable": {
+    "matches": [
+      "https://claude.ai/*",
+      "https://*.claude.ai/*"
+    ]
+  },
+  "commands": {
+    "toggle-side-panel": {
+      "suggested_key": {
+        "default": "Ctrl+E",
+        "mac": "Command+E"
+      },
+      "description": "Toggle Claude (log only in headless mode)"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:;"
+  }
+}
