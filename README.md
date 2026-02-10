@@ -28,16 +28,6 @@ Repeat for each profile. Press Enter in the installer to continue.
 
 The installer scans Chrome and prints the profiles + extension IDs it found. Restart Chrome when done.
 
-**4. Verify (optional)**
-
-After restarting Chrome, check that all profiles are connected:
-
-```bash
-python browser-ws.py list-browsers
-```
-
-This should list every Chrome profile where the extension is loaded.
-
 ## How it works
 
 ```
