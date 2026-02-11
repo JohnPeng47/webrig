@@ -106,6 +106,7 @@ class WebRigServer:
         self.unclassified: set = set()
         self.pending_requests: dict[str, object] = {}  # tool_use_id -> agent ws
         self.pending_list_tools: dict[str, object] = {}  # email -> agent ws
+        self.pending_tab_groups: dict[str, asyncio.Future] = {}  # email -> Future
 
     async def handler(self, websocket):
         """Per-connection handler. Classifies the connection on first message."""
@@ -216,6 +217,39 @@ class WebRigServer:
                     "is_error": True,
                 }))
 
+        elif msg_type == "list_tab_groups":
+            # Fan out to all connected browsers and aggregate results
+            all_groups = []
+            futures = {}
+            loop = asyncio.get_event_loop()
+
+            for email, bc in self.browsers.items():
+                fut = loop.create_future()
+                self.pending_tab_groups[email] = fut
+                futures[email] = fut
+                try:
+                    await bc.ws.send(json.dumps({"type": "list_tab_groups"}))
+                except Exception as e:
+                    logger.warning(f"Failed to send list_tab_groups to {email}: {e}")
+                    fut.set_result([])
+
+            # Wait for all browsers to respond (5s timeout)
+            for email, fut in futures.items():
+                try:
+                    groups = await asyncio.wait_for(fut, timeout=5)
+                    for g in groups:
+                        g["browser"] = email
+                    all_groups.extend(groups)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Timeout waiting for tab groups from {email}")
+                finally:
+                    self.pending_tab_groups.pop(email, None)
+
+            await ws.send(json.dumps({
+                "type": "tab_groups_list",
+                "groups": all_groups,
+            }))
+
         else:
             logger.warning(f"Unknown agent message type: {msg_type}")
 
@@ -242,6 +276,13 @@ class WebRigServer:
                         await agent_ws.send(json.dumps(msg))
                     except Exception:
                         pass
+
+        elif msg_type == "tab_groups_list":
+            email = self._find_browser_email(ws)
+            if email and email in self.pending_tab_groups:
+                fut = self.pending_tab_groups[email]
+                if not fut.done():
+                    fut.set_result(msg.get("groups", []))
 
         elif msg_type == "pong":
             pass

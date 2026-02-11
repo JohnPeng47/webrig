@@ -30,6 +30,9 @@ class TabManager {
   /** Maps `groupId` -> set of `tabId`s managed by this class. */
   private groups = new Map<number, Set<number>>();
 
+  /** Maps `groupId` -> user-facing title. */
+  private groupTitles = new Map<number, string>();
+
   /** Interval handle for the heartbeat timer. */
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -54,11 +57,12 @@ class TabManager {
     // ── Tab-group listeners ────────────────────────────────────
     chrome.tabGroups.onUpdated.addListener((group) => {
       // If Chrome or the user renamed / recoloured our group,
-      // force it back to the Claude branding.
+      // force it back to the expected branding.
       if (this.groups.has(group.id)) {
-        if (group.title !== GROUP_TITLE || group.color !== GROUP_COLOR) {
+        const expectedTitle = this.groupTitles.get(group.id) || GROUP_TITLE;
+        if (group.title !== expectedTitle || group.color !== GROUP_COLOR) {
           chrome.tabGroups
-            .update(group.id, { title: GROUP_TITLE, color: GROUP_COLOR })
+            .update(group.id, { title: expectedTitle, color: GROUP_COLOR })
             .catch(() => {
               // Group may have been removed concurrently.
             });
@@ -85,10 +89,12 @@ class TabManager {
       collapsed: false,
     });
 
+    const groupTitle = title || GROUP_TITLE;
     this.groups.set(groupId, new Set([tabId]));
+    this.groupTitles.set(groupId, groupTitle);
     await this.persistActiveGroupId(groupId);
 
-    console.log(`${LOG_PREFIX} Created group ${groupId} with tab ${tabId}`);
+    console.log(`${LOG_PREFIX} Created group ${groupId} ("${groupTitle}") with tab ${tabId}`);
     return groupId;
   }
 
@@ -114,6 +120,74 @@ class TabManager {
       return undefined;
     }
     return tabs.values().next().value as number;
+  }
+
+  /**
+   * Find a managed group by its title (case-insensitive).
+   * Returns the group ID or `undefined`.
+   */
+  findGroupByTitle(title: string): number | undefined {
+    const lower = title.toLowerCase();
+    for (const [groupId, groupTitle] of this.groupTitles) {
+      if (groupTitle.toLowerCase() === lower && this.groups.has(groupId)) {
+        return groupId;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Add a tab to an existing managed group.
+   * Moves the tab to the group's window first if necessary.
+   */
+  async addTabToGroup(tabId: number, groupId: number): Promise<void> {
+    // Ensure the tab is in the same window as the group
+    const groupTabs = await chrome.tabs.query({ groupId });
+    if (groupTabs.length > 0) {
+      const groupWindowId = groupTabs[0].windowId;
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.windowId !== groupWindowId) {
+        await chrome.tabs.move(tabId, { windowId: groupWindowId, index: -1 });
+      }
+    }
+
+    await chrome.tabs.group({ tabIds: [tabId], groupId });
+    const tabs = this.groups.get(groupId);
+    if (tabs) {
+      tabs.add(tabId);
+    }
+    console.log(`${LOG_PREFIX} Added tab ${tabId} to group ${groupId}`);
+  }
+
+  /**
+   * Return info about all managed tab groups, including titles and tab details.
+   */
+  async getGroups(): Promise<Array<{ groupId: number; title: string; tabs: Array<{ id: number; url: string; title: string }> }>> {
+    const result: Array<{ groupId: number; title: string; tabs: Array<{ id: number; url: string; title: string }> }> = [];
+
+    for (const [groupId, tabIds] of this.groups) {
+      const title = this.groupTitles.get(groupId) || GROUP_TITLE;
+      const tabs: Array<{ id: number; url: string; title: string }> = [];
+
+      for (const tabId of tabIds) {
+        try {
+          const tab = await chrome.tabs.get(tabId);
+          tabs.push({
+            id: tab.id ?? tabId,
+            url: tab.url ?? '',
+            title: tab.title ?? '',
+          });
+        } catch {
+          // Tab no longer exists
+        }
+      }
+
+      if (tabs.length > 0) {
+        result.push({ groupId, title, tabs });
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -162,6 +236,7 @@ class TabManager {
 
     if (tabs.size === 0) {
       this.groups.delete(groupId);
+      this.groupTitles.delete(groupId);
 
       // Clear persisted group ID if it was the active one.
       const storedId = await storageGet<number>(StorageKey.MCP_TAB_GROUP_ID);
@@ -190,6 +265,7 @@ class TabManager {
       this.groups.delete(groupId);
     }
 
+    this.groupTitles.clear();
     await storageRemove(StorageKey.MCP_TAB_GROUP_ID);
     console.log(`${LOG_PREFIX} All groups cleared`);
   }
@@ -338,6 +414,7 @@ class TabManager {
 
       if (tabs.size === 0) {
         this.groups.delete(groupId);
+        this.groupTitles.delete(groupId);
       }
     }
   }

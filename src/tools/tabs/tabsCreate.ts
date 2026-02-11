@@ -35,6 +35,7 @@ async function createTab(
   url: string,
   context: ToolExecutionContext,
   name?: string,
+  tabGroup?: string,
 ): Promise<chrome.tabs.Tab> {
   // Determine which window to open in — use current tab's window, or fall back to last focused
   let windowId: number | undefined;
@@ -56,10 +57,19 @@ async function createTab(
     windowId,
   });
 
-  // Always create a new tab group for this tab
+  // Group the tab: join existing group by name, or create a new one
   if (newTab.id != null) {
     try {
-      await tabManager.createGroup(newTab.id, name);
+      if (tabGroup) {
+        const existingGroupId = tabManager.findGroupByTitle(tabGroup);
+        if (existingGroupId !== undefined) {
+          await tabManager.addTabToGroup(newTab.id, existingGroupId);
+        } else {
+          await tabManager.createGroup(newTab.id, tabGroup);
+        }
+      } else {
+        await tabManager.createGroup(newTab.id, name);
+      }
     } catch {
       // Tab grouping is not fatal
     }
@@ -80,7 +90,12 @@ export const tabsCreateTool: ToolDefinition = {
     },
     name: {
       type: 'string',
-      description: 'Short label (2 words max) for the tab group, describing the task.',
+      description: 'Short label (2 words max) for a new tab group, describing the task.',
+      required: false,
+    },
+    tab_group: {
+      type: 'string',
+      description: 'Name of an existing tab group to add this tab to. If the group does not exist, a new one is created with this name.',
       required: false,
     },
   },
@@ -94,9 +109,10 @@ export const tabsCreateTool: ToolDefinition = {
       return errorResult('Missing required parameter: url');
     }
     const name = args.name as string | undefined;
+    const tabGroup = args.tab_group as string | undefined;
 
     try {
-      const tab = await createTab(url, context, name);
+      const tab = await createTab(url, context, name, tabGroup);
       return textResult(
         JSON.stringify(
           {
@@ -132,7 +148,12 @@ export const tabsCreateMcpTool: ToolDefinition = {
     },
     name: {
       type: 'string',
-      description: 'Short label (2 words max) for the tab group, describing the task.',
+      description: 'Short label (2 words max) for a new tab group, describing the task.',
+      required: false,
+    },
+    tab_group: {
+      type: 'string',
+      description: 'Name of an existing tab group to add this tab to. If the group does not exist, a new one is created with this name.',
       required: false,
     },
   },
@@ -146,9 +167,10 @@ export const tabsCreateMcpTool: ToolDefinition = {
       return errorResult('Missing required parameter: url');
     }
     const name = args.name as string | undefined;
+    const tabGroup = args.tab_group as string | undefined;
 
     try {
-      const tab = await createTab(url, context, name);
+      const tab = await createTab(url, context, name, tabGroup);
       return textResult(
         JSON.stringify(
           {

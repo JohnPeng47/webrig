@@ -6,6 +6,7 @@
  */
 
 import { toolRegistry } from '../tools/registry';
+import { tabManager } from './tabManager';
 
 const LOCAL_WS_URL = 'ws://localhost:7680';
 const MAX_RECONNECT_ATTEMPTS = 100;
@@ -135,6 +136,10 @@ class WebSocketBridge {
         });
         break;
 
+      case 'list_tab_groups':
+        await this.handleListTabGroups();
+        break;
+
       default:
         console.warn(`${LOG_PREFIX} Unknown message type: ${type}`);
         break;
@@ -179,6 +184,22 @@ class WebSocketBridge {
         tool_name: toolName,
         content: errorMessage,
         is_error: true,
+      });
+    }
+  }
+
+  private async handleListTabGroups(): Promise<void> {
+    try {
+      const groups = await tabManager.getGroups();
+      this.sendMessage({
+        type: 'tab_groups_list',
+        groups,
+      });
+    } catch (err) {
+      this.sendMessage({
+        type: 'tab_groups_list',
+        groups: [],
+        error: err instanceof Error ? err.message : String(err),
       });
     }
   }
