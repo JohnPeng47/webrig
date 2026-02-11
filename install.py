@@ -5,18 +5,18 @@ Unified installer for the WebRig browser extension + native messaging host.
 Usage:
     python install.py              # full install (build + register)
     python install.py --skip-build # skip npm build, just register native host
-    python install.py <ext-id>     # use a specific extension ID
 
 Works on Windows, macOS, and Linux.
 
 Steps performed:
-  1. Check prerequisites (Node.js, npm, Python 3, pip)
-  2. Install npm dependencies and build the extension
-  3. Install Python dependencies (websockets)
-  4. Prompt to load extension in Chrome (if not already detected)
-  5. Auto-detect or accept extension ID
-  6. Generate native messaging host manifest + wrapper script
-  7. Register native messaging host with Chrome
+  1. Clean up all previous installation traces
+  2. Check prerequisites (Node.js, npm, Python 3, pip)
+  3. Build the extension (once)
+  4. Install Python dependencies (websockets)
+  5. Enumerate Chrome profiles and prompt for selection
+  6. For each selected profile, create a separate extension bundle
+  7. Guide user to load each bundle, then confirm detection
+  8. Register native messaging host with all detected extension IDs
 """
 
 import glob
@@ -87,306 +87,7 @@ def which(name: str) -> str | None:
     return shutil.which(name)
 
 
-def prompt_yn(question: str, default: bool = True) -> bool:
-    suffix = " [Y/n] " if default else " [y/N] "
-    answer = input(question + suffix).strip().lower()
-    if not answer:
-        return default
-    return answer in ("y", "yes")
-
-
-# ── 1. Prerequisites ────────────────────────────────────────────
-
-def check_prerequisites() -> bool:
-    header("Checking prerequisites")
-    ok = True
-
-    # Node.js
-    node = which("node")
-    if node:
-        version = subprocess.check_output([node, "--version"], text=True).strip()
-        info(f"Node.js: {version} ({node})")
-    else:
-        error("Node.js not found. Install from https://nodejs.org/")
-        ok = False
-
-    # npm (on Windows this is npm.cmd, so we must use the resolved path)
-    npm = which("npm")
-    if npm:
-        version = subprocess.check_output([npm, "--version"], text=True).strip()
-        info(f"npm: {version} ({npm})")
-    else:
-        error("npm not found. It should come with Node.js.")
-        ok = False
-
-    # Python 3 (we're running in it, so just report)
-    info(f"Python: {sys.version.split()[0]} ({sys.executable})")
-
-    # pip — check we can import pip or find it
-    try:
-        subprocess.check_output(
-            [sys.executable, "-m", "pip", "--version"],
-            text=True, stderr=subprocess.DEVNULL,
-        )
-        info("pip: available")
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        warn("pip not found. Python dependencies will need manual install.")
-
-    # Check native-host/host.py exists
-    if os.path.exists(HOST_SCRIPT):
-        info(f"Native host script: {HOST_SCRIPT}")
-    else:
-        error(f"Native host script not found at: {HOST_SCRIPT}")
-        ok = False
-
-    return ok
-
-
-# ── 2. Build extension ──────────────────────────────────────────
-
-def build_extension() -> bool:
-    header("Building extension")
-
-    npm = which("npm")
-    if not npm:
-        error("npm not found. Cannot build.")
-        return False
-
-    # npm install
-    info("Installing npm dependencies...")
-    result = subprocess.run([npm, "install"], cwd=SCRIPT_DIR)
-    if result.returncode != 0:
-        error("npm install failed.")
-        return False
-
-    # npm run build
-    info("Building extension (vite + tsc)...")
-    result = subprocess.run([npm, "run", "build"], cwd=SCRIPT_DIR)
-    if result.returncode != 0:
-        error("Extension build failed.")
-        return False
-
-    if os.path.isdir(DIST_DIR):
-        info(f"Build output: {DIST_DIR}")
-    else:
-        error(f"dist/ directory not found after build.")
-        return False
-
-    return True
-
-
-# ── 3. Python dependencies ──────────────────────────────────────
-
-def install_python_deps() -> bool:
-    header("Installing Python dependencies")
-    try:
-        import websockets  # noqa: F401
-        info("websockets already installed")
-        return True
-    except ImportError:
-        pass
-
-    info("Installing websockets...")
-    result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "websockets"],
-        check=False,
-    )
-    if result.returncode != 0:
-        error("Failed to install websockets. Install manually: pip install websockets")
-        return False
-    info("websockets installed")
-    return True
-
-
-# ── 4. Chrome extension ID detection ────────────────────────────
-
-def chrome_user_data_dir() -> str:
-    if SYSTEM == "Windows":
-        return os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
-    elif SYSTEM == "Darwin":
-        return os.path.expanduser("~/Library/Application Support/Google/Chrome")
-    else:
-        return os.path.expanduser("~/.config/google-chrome")
-
-
-def _is_our_extension(ext_path: str, ext_info: dict) -> bool:
-    """Determine if a Chrome extension entry is ours.
-
-    Only matches extensions whose source directory still exists on disk
-    (stale prefs entries from deleted/renamed dirs are skipped).
-
-    Checks (in order):
-      1. Exact path match against current dist/ dir
-      2. Manifest on disk has name "Claude (Headless)"
-    """
-    # Skip entries where the extension directory no longer exists —
-    # these are stale Chrome prefs from deleted/renamed folders
-    if not os.path.isdir(ext_path):
-        return False
-
-    dist_norm = os.path.normcase(os.path.normpath(DIST_DIR))
-    ext_path_norm = os.path.normcase(os.path.normpath(ext_path))
-
-    # Match 1: exact dist/ path
-    if ext_path_norm == dist_norm:
-        return True
-
-    # Match 2: manifest on disk has our extension name
-    manifest_candidate = os.path.join(ext_path, "manifest.json")
-    try:
-        with open(manifest_candidate, "r", encoding="utf-8") as mf:
-            manifest = json.load(mf)
-        if manifest.get("name") == "Claude (Headless)":
-            return True
-    except (json.JSONDecodeError, OSError):
-        pass
-
-    return False
-
-
-def detect_extension_installations() -> list[dict]:
-    """Scan Chrome profiles for our extension.
-
-    Returns a list of dicts with keys: id, profile, profile_name, ext_path.
-    A single extension ID can appear in multiple profiles.
-    """
-    chrome_dir = chrome_user_data_dir()
-    results: list[dict] = []
-
-    for prefs_path in glob.glob(os.path.join(chrome_dir, "*", "Secure Preferences")):
-        try:
-            with open(prefs_path, "r", encoding="utf-8") as f:
-                prefs = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            continue
-
-        profile_dir = os.path.basename(os.path.dirname(prefs_path))
-
-        # Profile name lives in Preferences (not Secure Preferences)
-        profile_name = profile_dir
-        regular_prefs_path = os.path.join(os.path.dirname(prefs_path), "Preferences")
-        try:
-            with open(regular_prefs_path, "r", encoding="utf-8") as f:
-                regular_prefs = json.load(f)
-            name = regular_prefs.get("profile", {}).get("name")
-            acct = regular_prefs.get("account_info", [])
-            email = acct[0].get("email") if acct else None
-            # Show "Name (email)" if both available, else just the name
-            if name and email:
-                profile_name = f"{name} ({email})"
-            elif name:
-                profile_name = name
-        except (json.JSONDecodeError, OSError):
-            pass
-
-        exts = prefs.get("extensions", {}).get("settings", {})
-        for ext_id, ext_info in exts.items():
-            ext_path = ext_info.get("path", "")
-            if not ext_path:
-                continue
-
-            if _is_our_extension(ext_path, ext_info):
-                results.append({
-                    "id": ext_id,
-                    "profile": profile_dir,
-                    "profile_name": profile_name,
-                    "ext_path": ext_path,
-                })
-
-    return results
-
-
-def print_extension_summary(installations: list[dict]) -> None:
-    """Print a table of all Chrome profiles where the extension is installed."""
-    if not installations:
-        return
-
-    # Deduplicate by (id, profile)
-    unique = {(i["id"], i["profile"]): i for i in installations}
-    rows = sorted(unique.values(), key=lambda r: (r["id"], r["profile"]))
-
-    # Collect unique IDs
-    unique_ids = sorted({r["id"] for r in rows})
-    multi_id = len(unique_ids) > 1
-
-    # Compute column width from longest profile name
-    max_name = max(len(r["profile_name"]) for r in rows)
-    col_w = max(max_name + 2, 20)
-    table_w = col_w + 34
-
-    print()
-    print(f"  Extension installed in {len(rows)} Chrome profile(s):")
-    print(f"  {'─' * table_w}")
-    print(f"  {'Profile':<{col_w}} {'Extension ID'}")
-    print(f"  {'─' * table_w}")
-    for row in rows:
-        print(f"  {row['profile_name']:<{col_w}} {row['id']}")
-    print(f"  {'─' * table_w}")
-
-    if multi_id:
-        warn(
-            f"Multiple extension IDs detected ({len(unique_ids)}). "
-            "This is normal if loaded in different profiles."
-        )
-        info("All IDs will be registered as allowed origins.")
-    print()
-
-
-def get_extension_ids(cli_id: str | None) -> list[str]:
-    header("Detecting extension ID")
-
-    if cli_id:
-        info(f"Using provided extension ID: {cli_id}")
-        return [cli_id]
-
-    # First scan — maybe the extension is already loaded
-    info("Scanning Chrome profiles...")
-    installations = detect_extension_installations()
-
-    if installations:
-        print_extension_summary(installations)
-        unique_ids = sorted({i["id"] for i in installations})
-        return unique_ids
-
-    # Not found — guide the user to load it first, then retry
-    warn("Extension not found in any Chrome profile.")
-    print()
-    print("  The extension must be loaded in Chrome before registration.")
-    print("  Please do this now:")
-    print()
-    print("    1. Open Chrome and go to chrome://extensions")
-    print("    2. Enable 'Developer mode' (top-right toggle)")
-    print(f"    3. Click 'Load unpacked' and select:")
-    print(f"       {DIST_DIR}")
-    print()
-
-    input("  Press Enter after loading the extension in Chrome...")
-    print()
-
-    # Second scan — retry after user loaded it
-    info("Re-scanning Chrome profiles...")
-    installations = detect_extension_installations()
-
-    if installations:
-        print_extension_summary(installations)
-        unique_ids = sorted({i["id"] for i in installations})
-        return unique_ids
-
-    # Still not found — fall back to manual entry
-    warn("Still not detected. Chrome may need to be restarted first.")
-    print("  You can also enter the extension ID manually.")
-    print("  (Find it on the chrome://extensions page under the extension name)")
-    print()
-
-    user_id = input("  Enter extension ID (or press Enter to abort): ").strip()
-    if not user_id:
-        error("No extension ID provided. Aborting.")
-        sys.exit(1)
-
-    return [user_id]
-
-
-# ── 5. Kill stale processes ─────────────────────────────────────
+# ── 1. Cleanup ──────────────────────────────────────────────────
 
 def kill_process_on_port(port: int) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -427,7 +128,382 @@ def kill_process_on_port(port: int) -> None:
     info(f"Port {port} freed.")
 
 
-# ── 6. Register native messaging host ───────────────────────────
+def cleanup_previous_install() -> None:
+    """Remove all traces of previous WebRig installations."""
+    header("Cleaning up previous installation")
+
+    # Kill stale process on WS port
+    kill_process_on_port(WS_PORT)
+
+    # Remove Windows registry entry
+    if SYSTEM == "Windows":
+        try:
+            import winreg
+            key_path = f"Software\\Google\\Chrome\\NativeMessagingHosts\\{HOST_NAME}"
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path)
+            info(f"Removed registry key: HKCU\\{key_path}")
+        except FileNotFoundError:
+            info("No registry entry found")
+        except Exception as e:
+            warn(f"Could not remove registry key: {e}")
+
+    # Remove macOS symlink
+    elif SYSTEM == "Darwin":
+        target = os.path.expanduser(
+            f"~/Library/Application Support/Google/Chrome/NativeMessagingHosts/{HOST_NAME}.json"
+        )
+        if os.path.exists(target) or os.path.islink(target):
+            os.remove(target)
+            info(f"Removed: {target}")
+        else:
+            info("No macOS native host symlink found")
+
+    # Remove Linux symlink
+    else:
+        target = os.path.expanduser(
+            f"~/.config/google-chrome/NativeMessagingHosts/{HOST_NAME}.json"
+        )
+        if os.path.exists(target) or os.path.islink(target):
+            os.remove(target)
+            info(f"Removed: {target}")
+        else:
+            info("No Linux native host symlink found")
+
+    # Remove .webrig directory
+    if os.path.isdir(WEBRIG_DIR):
+        shutil.rmtree(WEBRIG_DIR)
+        info(f"Removed app data: {WEBRIG_DIR}")
+    else:
+        info("No app data directory found")
+
+    # Remove all dist-* directories (profile-specific bundles)
+    removed_any = False
+    for d in glob.glob(os.path.join(SCRIPT_DIR, "dist-*")):
+        if os.path.isdir(d):
+            shutil.rmtree(d)
+            info(f"Removed: {os.path.basename(d)}")
+            removed_any = True
+    if not removed_any:
+        info("No previous profile bundles found")
+
+    info("Cleanup complete")
+
+
+# ── 2. Prerequisites ────────────────────────────────────────────
+
+def check_prerequisites() -> bool:
+    header("Checking prerequisites")
+    ok = True
+
+    node = which("node")
+    if node:
+        version = subprocess.check_output([node, "--version"], text=True).strip()
+        info(f"Node.js: {version} ({node})")
+    else:
+        error("Node.js not found. Install from https://nodejs.org/")
+        ok = False
+
+    npm = which("npm")
+    if npm:
+        version = subprocess.check_output([npm, "--version"], text=True).strip()
+        info(f"npm: {version} ({npm})")
+    else:
+        error("npm not found. It should come with Node.js.")
+        ok = False
+
+    info(f"Python: {sys.version.split()[0]} ({sys.executable})")
+
+    try:
+        subprocess.check_output(
+            [sys.executable, "-m", "pip", "--version"],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+        info("pip: available")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        warn("pip not found. Python dependencies will need manual install.")
+
+    if os.path.exists(HOST_SCRIPT):
+        info(f"Native host script: {HOST_SCRIPT}")
+    else:
+        error(f"Native host script not found at: {HOST_SCRIPT}")
+        ok = False
+
+    return ok
+
+
+# ── 3. Build extension ──────────────────────────────────────────
+
+def build_extension() -> bool:
+    header("Building extension")
+
+    npm = which("npm")
+    if not npm:
+        error("npm not found. Cannot build.")
+        return False
+
+    info("Installing npm dependencies...")
+    result = subprocess.run([npm, "install"], cwd=SCRIPT_DIR)
+    if result.returncode != 0:
+        error("npm install failed.")
+        return False
+
+    info("Building extension (vite + tsc)...")
+    result = subprocess.run([npm, "run", "build"], cwd=SCRIPT_DIR)
+    if result.returncode != 0:
+        error("Extension build failed.")
+        return False
+
+    if os.path.isdir(DIST_DIR):
+        info(f"Build output: {DIST_DIR}")
+    else:
+        error("dist/ directory not found after build.")
+        return False
+
+    return True
+
+
+# ── 4. Python dependencies ──────────────────────────────────────
+
+def install_python_deps() -> bool:
+    header("Installing Python dependencies")
+    try:
+        import websockets  # noqa: F401
+        info("websockets already installed")
+        return True
+    except ImportError:
+        pass
+
+    info("Installing websockets...")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "websockets"],
+        check=False,
+    )
+    if result.returncode != 0:
+        error("Failed to install websockets. Install manually: pip install websockets")
+        return False
+    info("websockets installed")
+    return True
+
+
+# ── 5. Chrome profile enumeration ───────────────────────────────
+
+def chrome_user_data_dir() -> str:
+    if SYSTEM == "Windows":
+        return os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data")
+    elif SYSTEM == "Darwin":
+        return os.path.expanduser("~/Library/Application Support/Google/Chrome")
+    else:
+        return os.path.expanduser("~/.config/google-chrome")
+
+
+def enumerate_chrome_profiles() -> list[dict]:
+    """Find all Chrome profiles and their display names.
+
+    Returns list of dicts with keys: dir, name, path
+    """
+    chrome_dir = chrome_user_data_dir()
+    profiles = []
+
+    for prefs_path in glob.glob(os.path.join(chrome_dir, "*", "Preferences")):
+        profile_dir = os.path.basename(os.path.dirname(prefs_path))
+
+        # Skip non-profile directories
+        if profile_dir in ("System Profile", "Guest Profile"):
+            continue
+
+        try:
+            with open(prefs_path, "r", encoding="utf-8") as f:
+                prefs = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        name = prefs.get("profile", {}).get("name", profile_dir)
+        acct = prefs.get("account_info", [])
+        email = acct[0].get("email") if acct else None
+
+        if name and email:
+            display_name = f"{name} ({email})"
+        elif name:
+            display_name = name
+        else:
+            display_name = profile_dir
+
+        profiles.append({
+            "dir": profile_dir,
+            "name": display_name,
+            "path": os.path.dirname(prefs_path),
+        })
+
+    return sorted(profiles, key=lambda p: p["dir"])
+
+
+def select_profiles(profiles: list[dict]) -> list[dict]:
+    """Display numbered list of profiles and let user select."""
+    header("Chrome profiles found")
+
+    if not profiles:
+        error("No Chrome profiles found!")
+        sys.exit(1)
+
+    print()
+    for i, profile in enumerate(profiles, 1):
+        print(f"  {i}. {profile['name']}  [{profile['dir']}]")
+    print()
+
+    selection = input("  Enter profile numbers to install (e.g. 1,3,4): ").strip()
+    if not selection:
+        error("No profiles selected. Aborting.")
+        sys.exit(1)
+
+    try:
+        indices = [int(x.strip()) for x in selection.split(",")]
+    except ValueError:
+        error("Invalid input. Enter comma-separated numbers.")
+        sys.exit(1)
+
+    selected = []
+    for idx in indices:
+        if 1 <= idx <= len(profiles):
+            selected.append(profiles[idx - 1])
+        else:
+            warn(f"Skipping invalid number: {idx}")
+
+    if not selected:
+        error("No valid profiles selected. Aborting.")
+        sys.exit(1)
+
+    print()
+    info(f"Selected {len(selected)} profile(s):")
+    for p in selected:
+        info(f"  - {p['name']}")
+
+    return selected
+
+
+# ── 6. Per-profile extension setup ──────────────────────────────
+
+def profile_slug(profile: dict) -> str:
+    """Create a filesystem-safe slug from the profile directory name."""
+    return profile["dir"].lower().replace(" ", "-")
+
+
+def create_profile_bundle(profile: dict) -> str:
+    """Copy dist/ to a profile-specific directory."""
+    slug = profile_slug(profile)
+    dest = os.path.join(SCRIPT_DIR, f"dist-{slug}")
+
+    if os.path.exists(dest):
+        shutil.rmtree(dest)
+
+    shutil.copytree(DIST_DIR, dest)
+    info(f"Created bundle: dist-{slug}/")
+    return dest
+
+
+def detect_extension_in_profile(profile: dict, expected_dist: str) -> str | None:
+    """Detect our extension in a specific Chrome profile.
+
+    Checks for extension whose path matches expected_dist or whose
+    manifest name is "Claude (Headless)".
+
+    Returns extension ID or None.
+    """
+    prefs_path = os.path.join(profile["path"], "Secure Preferences")
+
+    try:
+        with open(prefs_path, "r", encoding="utf-8") as f:
+            prefs = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    exts = prefs.get("extensions", {}).get("settings", {})
+    expected_norm = os.path.normcase(os.path.normpath(expected_dist))
+
+    for ext_id, ext_info in exts.items():
+        ext_path = ext_info.get("path", "")
+        if not ext_path:
+            continue
+
+        ext_path_norm = os.path.normcase(os.path.normpath(ext_path))
+
+        # Match by exact path
+        if ext_path_norm == expected_norm:
+            return ext_id
+
+        # Match by manifest name (fallback)
+        if os.path.isdir(ext_path):
+            manifest_path = os.path.join(ext_path, "manifest.json")
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+                if manifest.get("name") == "Claude (Headless)":
+                    return ext_id
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    return None
+
+
+def poll_extension_in_profile(profile: dict, expected_dist: str, attempts: int = 6, interval: float = 2.0) -> str | None:
+    """Poll Chrome's Secure Preferences for our extension, retrying with a delay."""
+    import time
+    for i in range(attempts):
+        ext_id = detect_extension_in_profile(profile, expected_dist)
+        if ext_id:
+            return ext_id
+        if i < attempts - 1:
+            print(f"\r  Waiting for Chrome to flush prefs... ({i+1}/{attempts})", end="", flush=True)
+            time.sleep(interval)
+    print()  # newline after progress
+    return None
+
+
+def setup_profile(profile: dict) -> str | None:
+    """Set up extension for a single profile.
+
+    Creates a profile-specific bundle, guides the user to load it,
+    then detects the extension ID (with polling + manual fallback).
+
+    Returns extension ID if successful, None otherwise.
+    """
+    dist_path = create_profile_bundle(profile)
+
+    print()
+    print(f"  ┌──────────────────────────────────────────────────────")
+    print(f"  │  Profile: {profile['name']}")
+    print(f"  │")
+    print(f"  │  1. Open Chrome with this profile")
+    print(f"  │  2. Go to chrome://extensions")
+    print(f"  │  3. Enable 'Developer mode' (top-right toggle)")
+    print(f"  │  4. Click 'Load unpacked' and select:")
+    print(f"  │     {dist_path}")
+    print(f"  └──────────────────────────────────────────────────────")
+    print()
+
+    input("  Press Enter after loading the extension...")
+
+    # Poll for detection (6 attempts, 2s apart = ~12s max)
+    info(f"Detecting extension in profile: {profile['name']}...")
+    ext_id = poll_extension_in_profile(profile, dist_path)
+
+    if ext_id:
+        info(f"Extension detected! ID: {ext_id}")
+        return ext_id
+
+    # Manual fallback
+    warn("Auto-detection failed (Chrome may not have flushed prefs to disk).")
+    print("  Copy the extension ID from chrome://extensions (shown under the extension name).")
+    print()
+    ext_id = input("  Paste extension ID (or press Enter to skip): ").strip()
+    if not ext_id:
+        warn(f"No ID entered, skipping profile: {profile['name']}")
+        return None
+
+    info(f"Extension ID: {ext_id}")
+    return ext_id
+
+
+# ── 7. Register native messaging host ───────────────────────────
 
 def create_wrapper_script() -> str:
     """Create the platform-specific wrapper that Chrome launches."""
@@ -508,9 +584,9 @@ def register_native_host(extension_ids: list[str]) -> None:
     header("Registering native messaging host")
 
     origins = [f"chrome-extension://{eid}/" for eid in extension_ids]
-    info(f"Allowed origins: {origins}")
-
-    kill_process_on_port(WS_PORT)
+    info(f"Allowed origins ({len(origins)}):")
+    for origin in origins:
+        info(f"  {origin}")
 
     host_path = create_wrapper_script()
     manifest_path = write_manifest(host_path, origins)
@@ -534,55 +610,75 @@ def main() -> None:
     print(f"  Native host:      {HOST_SCRIPT}")
     print(f"  App data dir:     {WEBRIG_DIR}")
 
-    # Parse args
     skip_build = "--skip-build" in sys.argv
-    cli_id = None
-    for arg in sys.argv[1:]:
-        if not arg.startswith("-"):
-            cli_id = arg.strip()
-            break
 
-    # Step 1: Prerequisites
+    # Step 1: Clean up previous installation
+    cleanup_previous_install()
+
+    # Step 2: Prerequisites
     if not check_prerequisites():
         error("Prerequisites check failed. Fix the issues above and retry.")
         sys.exit(1)
 
-    # Step 2: Build extension
+    # Step 3: Build extension
     if skip_build:
         info("Skipping build (--skip-build)")
         if not os.path.isdir(DIST_DIR):
-            error(f"dist/ not found. Run without --skip-build first.")
+            error("dist/ not found. Run without --skip-build first.")
             sys.exit(1)
     else:
         if not build_extension():
             sys.exit(1)
 
-    # Step 3: Python dependencies
+    # Step 4: Python dependencies
     if not install_python_deps():
         warn("Continuing without websockets — native host may fail at runtime.")
 
-    # Step 3.5: Create .webrig app data directory
+    # Step 5: Set up .webrig app data directory
     header("Setting up app data directory")
     os.makedirs(WEBRIG_DIR, exist_ok=True)
     info(f"App data directory: {WEBRIG_DIR}")
 
-    # Step 4: Extension ID (pauses here if extension not yet loaded in Chrome)
-    extension_ids = get_extension_ids(cli_id)
+    # Step 6: Enumerate Chrome profiles and select
+    profiles = enumerate_chrome_profiles()
+    selected = select_profiles(profiles)
 
-    # Step 5: Register native host
+    # Step 7: Set up extension for each selected profile
+    header("Setting up extension for each profile")
+
+    extension_ids = []
+    for i, profile in enumerate(selected, 1):
+        print()
+        info(f"Profile {i}/{len(selected)}: {profile['name']}")
+        ext_id = setup_profile(profile)
+        if ext_id:
+            extension_ids.append(ext_id)
+        else:
+            warn(f"Skipped profile: {profile['name']}")
+
+    if not extension_ids:
+        error("No extension IDs detected. Cannot register native host.")
+        sys.exit(1)
+
+    # Step 8: Register native host with all detected IDs
     register_native_host(extension_ids)
 
     # Done — final summary
     header("Installation complete")
     print()
-    print(f"  Registered {len(extension_ids)} extension ID(s):")
+    print(f"  Registered {len(extension_ids)} extension(s):")
     for eid in extension_ids:
         print(f"    chrome-extension://{eid}/")
+    print()
+    print(f"  Profile bundles:")
+    for p in selected:
+        slug = profile_slug(p)
+        print(f"    dist-{slug}/  ->  {p['name']}")
     print()
     print(f"  App data: {WEBRIG_DIR}")
     print()
     print("  Next steps:")
-    print("    1. Restart Chrome (or reload the extension at chrome://extensions)")
+    print("    1. Restart Chrome (or reload the extensions)")
     print(f"    2. Start the WebSocket server:")
     print(f'       python "{HOST_SCRIPT}"')
     print(f"    3. Server runs on ws://127.0.0.1:{WS_PORT}")
