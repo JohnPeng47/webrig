@@ -75,10 +75,13 @@ class WebSocketBridge {
         this.reconnectAttempts = 0;
 
         // Announce available tools to the server
-        this.sendMessage({
-          type: 'extension_connected',
-          tools: toolRegistry.getAll().map((t) => t.name),
-          tool_schemas: toolRegistry.getAllSchemas(),
+        this.getProfileEmail().then((email) => {
+          this.sendMessage({
+            type: 'extension_connected',
+            tools: toolRegistry.getAll().map((t) => t.name),
+            tool_schemas: toolRegistry.getAllSchemas(),
+            email: email || 'unknown',
+          });
         });
       });
 
@@ -146,17 +149,11 @@ class WebSocketBridge {
 
     // Auto-detect active tab if none specified
     if (tabId === undefined || tabId === null || tabId === 0) {
-      try {
-        const [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-        if (activeTab?.id) {
-          tabId = activeTab.id;
-        }
-      } catch {
-        // If tab query fails, leave tabId undefined
-      }
+      tabId = await this.resolveActiveTab();
+      console.log(`${LOG_PREFIX} Resolved active tab: ${tabId}`);
     }
 
-    console.log(`${LOG_PREFIX} Tool call: ${toolName} (tab=${tabId})`, args);
+    console.log(`${LOG_PREFIX} Tool call: ${toolName} (tab=${tabId ?? -1})`, args);
 
     try {
       const result = await toolRegistry.executeTool({
@@ -184,6 +181,53 @@ class WebSocketBridge {
         is_error: true,
       });
     }
+  }
+
+  // ── Profile identification ──────────────────────────────────────
+
+  private getProfileEmail(): Promise<string | null> {
+    return new Promise((resolve) => {
+      try {
+        chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' as chrome.identity.AccountStatus }, (userInfo) => {
+          resolve(userInfo?.email || null);
+        });
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  // ── Tab resolution ──────────────────────────────────────────────
+
+  private async resolveActiveTab(): Promise<number | undefined> {
+    // Strategy 1: active tab in the last focused window (skip chrome:// pages)
+    try {
+      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      const tab = tabs.find(
+        (t) => t.id !== undefined && t.id !== chrome.tabs.TAB_ID_NONE && !t.url?.startsWith('chrome://'),
+      );
+      if (tab?.id) return tab.id;
+    } catch { /* continue to next strategy */ }
+
+    // Strategy 2: active tab in any window
+    try {
+      const tabs = await chrome.tabs.query({ active: true });
+      const tab = tabs.find(
+        (t) => t.id !== undefined && t.id !== chrome.tabs.TAB_ID_NONE && !t.url?.startsWith('chrome://'),
+      );
+      if (tab?.id) return tab.id;
+    } catch { /* continue to next strategy */ }
+
+    // Strategy 3: most recently accessed non-chrome tab
+    try {
+      const tabs = await chrome.tabs.query({});
+      const valid = tabs
+        .filter((t) => t.id !== undefined && t.id !== chrome.tabs.TAB_ID_NONE && !t.url?.startsWith('chrome://'))
+        .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0));
+      if (valid[0]?.id) return valid[0].id;
+    } catch { /* give up */ }
+
+    return undefined;
   }
 
   // ── Reconnection with exponential backoff ────────────────────────

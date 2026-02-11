@@ -1,10 +1,10 @@
 /**
  * Message Router — dispatches chrome.runtime.onMessage messages.
  *
- * Headless build: no auth, no native messaging.
+ * Headless build: no auth, direct WebSocket bridge.
  */
 
-import { closeNativeMessagingBridge, reinitNativeMessagingBridge } from './nativeMessagingBridge';
+import { closeWebSocketBridge, reinitWebSocketBridge } from './webSocketBridge';
 
 const LOG_PREFIX = '[MessageRouter]';
 
@@ -23,8 +23,8 @@ export function setupMessageRouter(): void {
 
         case 'RECONNECT_BRIDGE':
           void (async () => {
-            closeNativeMessagingBridge();
-            reinitNativeMessagingBridge();
+            closeWebSocketBridge();
+            reinitWebSocketBridge();
             sendResponse({ success: true });
           })();
           return true;

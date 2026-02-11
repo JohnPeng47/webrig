@@ -32,14 +32,27 @@ import sys
 HOST_NAME = "com.claude.browser_agent"
 WS_PORT = 7680
 
+SYSTEM = platform.system()
+
 # Directories relative to this script
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DIST_DIR = os.path.join(SCRIPT_DIR, "dist")
-NATIVE_HOST_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "native-host")
+NATIVE_HOST_DIR = os.path.join(SCRIPT_DIR, "native-host")
 HOST_SCRIPT = os.path.join(NATIVE_HOST_DIR, "host.py")
-WS_SERVER_SCRIPT = os.path.join(os.path.dirname(SCRIPT_DIR), "ws_server.py")
 
-SYSTEM = platform.system()
+
+def get_webrig_dir() -> str:
+    """Return platform-appropriate .webrig app data directory."""
+    if SYSTEM == "Windows":
+        base = os.environ.get("LOCALAPPDATA", os.path.expanduser("~"))
+        return os.path.join(base, ".webrig")
+    elif SYSTEM == "Darwin":
+        return os.path.expanduser("~/Library/Application Support/.webrig")
+    else:
+        return os.path.expanduser("~/.local/share/.webrig")
+
+
+WEBRIG_DIR = get_webrig_dir()
 
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -418,10 +431,10 @@ def kill_process_on_port(port: int) -> None:
 
 def create_wrapper_script() -> str:
     """Create the platform-specific wrapper that Chrome launches."""
-    os.makedirs(NATIVE_HOST_DIR, exist_ok=True)
+    os.makedirs(WEBRIG_DIR, exist_ok=True)
 
     if SYSTEM == "Windows":
-        bat_path = os.path.join(NATIVE_HOST_DIR, "host.bat")
+        bat_path = os.path.join(WEBRIG_DIR, "host.bat")
         python_exe = sys.executable.replace("/", "\\")
         host_script_win = HOST_SCRIPT.replace("/", "\\")
         with open(bat_path, "w") as f:
@@ -442,7 +455,7 @@ def create_wrapper_script() -> str:
 
 
 def write_manifest(host_path: str, origins: list[str]) -> str:
-    manifest_path = os.path.join(NATIVE_HOST_DIR, f"{HOST_NAME}.json")
+    manifest_path = os.path.join(WEBRIG_DIR, f"{HOST_NAME}.json")
     manifest = {
         "name": HOST_NAME,
         "description": "Browser extension native messaging host",
@@ -518,7 +531,8 @@ def main() -> None:
     print("  ===================================")
     print(f"  Platform: {SYSTEM} ({platform.machine()})")
     print(f"  Extension source: {SCRIPT_DIR}")
-    print(f"  Native host dir:  {NATIVE_HOST_DIR}")
+    print(f"  Native host:      {HOST_SCRIPT}")
+    print(f"  App data dir:     {WEBRIG_DIR}")
 
     # Parse args
     skip_build = "--skip-build" in sys.argv
@@ -547,6 +561,11 @@ def main() -> None:
     if not install_python_deps():
         warn("Continuing without websockets — native host may fail at runtime.")
 
+    # Step 3.5: Create .webrig app data directory
+    header("Setting up app data directory")
+    os.makedirs(WEBRIG_DIR, exist_ok=True)
+    info(f"App data directory: {WEBRIG_DIR}")
+
     # Step 4: Extension ID (pauses here if extension not yet loaded in Chrome)
     extension_ids = get_extension_ids(cli_id)
 
@@ -560,10 +579,14 @@ def main() -> None:
     for eid in extension_ids:
         print(f"    chrome-extension://{eid}/")
     print()
+    print(f"  App data: {WEBRIG_DIR}")
+    print()
     print("  Next steps:")
     print("    1. Restart Chrome (or reload the extension at chrome://extensions)")
-    print("    2. The native messaging host will auto-start when the extension connects")
-    print(f"    3. WebSocket server runs on ws://127.0.0.1:{WS_PORT}")
+    print(f"    2. Start the WebSocket server:")
+    print(f'       python "{HOST_SCRIPT}"')
+    print(f"    3. Server runs on ws://127.0.0.1:{WS_PORT}")
+    print(f"    4. Logs are stored in: {WEBRIG_DIR}")
     print()
     print("  To reinstall after code changes:")
     print("    python install.py              # rebuild + re-register")

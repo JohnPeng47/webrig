@@ -1,6 +1,6 @@
 /**
- * Native messaging protocol types — messages exchanged between the
- * Chrome extension and the native-messaging host binary.
+ * Bridge protocol types — messages exchanged between the
+ * Chrome extension and the WebSocket server.
  */
 
 // ── Shared sub-types ──────────────────────────────────────────────

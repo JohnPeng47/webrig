@@ -1,8 +1,8 @@
 /**
  * Claude Browser Extension — Headless Service Worker Entry Point
  *
- * No UI, no auth. Uses Native Messaging to communicate with a local
- * Python relay host that exposes a WebSocket server for agent clients.
+ * No UI, no auth. Connects directly to a local WebSocket server
+ * for agent communication.
  */
 
 console.log('[ServiceWorker] Claude extension (headless) loaded');
@@ -13,13 +13,19 @@ import '../tools/index';
 // ── User-Agent rule for API requests ─────────────────────────────
 import { setupUserAgentRule } from './userAgentRule';
 
-// ── Native Messaging Bridge ─────────────────────────────────────
+// ── Native Messaging Bridge (launches host.py) ─────────────────
 import {
   nativeMessagingBridge,
   initNativeMessagingBridge,
-  closeNativeMessagingBridge,
-  reinitNativeMessagingBridge,
 } from './nativeMessagingBridge';
+
+// ── WebSocket Bridge (connects to host.py's WS server) ─────────
+import {
+  webSocketBridge,
+  initWebSocketBridge,
+  closeWebSocketBridge,
+  reinitWebSocketBridge,
+} from './webSocketBridge';
 
 // ── Tab Manager ──────────────────────────────────────────────────
 import { tabManager } from './tabManager';
@@ -43,12 +49,15 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   await setupUserAgentRule();
 
   setupDeepLinks(async () => {
-    closeNativeMessagingBridge();
-    initNativeMessagingBridge();
+    closeWebSocketBridge();
+    initWebSocketBridge();
   });
 
   tabManager.initialize();
+
+  // Launch host.py via native messaging, then connect over WebSocket
   initNativeMessagingBridge();
+  setTimeout(() => initWebSocketBridge(), 1000);
 
   await registerAllAlarms();
 });
@@ -63,12 +72,15 @@ chrome.runtime.onStartup.addListener(async () => {
   await setupUserAgentRule();
 
   setupDeepLinks(async () => {
-    closeNativeMessagingBridge();
-    initNativeMessagingBridge();
+    closeWebSocketBridge();
+    initWebSocketBridge();
   });
 
   tabManager.initialize();
+
+  // Launch host.py via native messaging, then connect over WebSocket
   initNativeMessagingBridge();
+  setTimeout(() => initWebSocketBridge(), 1000);
 
   await registerAllAlarms();
 });
@@ -103,8 +115,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 // ── Ensure imports are retained ──────────────────────────────────
 void nativeMessagingBridge;
+void webSocketBridge;
 void tabManager;
-void closeNativeMessagingBridge;
-void reinitNativeMessagingBridge;
+void closeWebSocketBridge;
+void reinitWebSocketBridge;
 
 export {};

@@ -2,7 +2,7 @@
  * extension_reload — Reload the extension from disk.
  *
  * Broadcasts a toast notification to all open tabs, waits briefly,
- * then calls chrome.runtime.reload(). The native messaging connection
+ * then calls chrome.runtime.reload(). The WebSocket connection
  * will drop and automatically reconnect with the new code.
  */
 

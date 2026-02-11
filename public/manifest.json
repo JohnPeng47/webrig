@@ -95,6 +95,6 @@
     }
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:;"
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws://localhost:7680 ws://127.0.0.1:7680; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:;"
   }
 }

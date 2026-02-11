@@ -33,9 +33,41 @@ The installer scans Chrome and prints the profiles + extension IDs it found. Res
 ```
 Agent (Claude, scripts, etc.)
     ↓ WebSocket (ws://localhost:7680)
-Native Host (host.py) ← launched by Chrome
-    ↓ Chrome Native Messaging
+Native Host (host.py) ← auto-launched by Chrome via native messaging
+    ↑ WebSocket (ws://localhost:7680)
 Chrome Extension
     ↓ Chrome APIs
 Browser
 ```
+
+1. Extension loads and calls `chrome.runtime.connectNative()` — Chrome launches `native-host/host.py`
+2. `host.py` starts a WebSocket server on `ws://localhost:7680`
+3. Extension connects to the WebSocket server
+4. Agent clients connect to the same server and send tool calls
+
+## Project structure
+
+```
+webrig/
+├── src/                        # TypeScript extension source
+│   ├── service-worker/         # Background service worker
+│   ├── tools/                  # 37+ browser automation tools
+│   ├── content-scripts/        # Page-injected scripts
+│   └── types/                  # Type definitions
+├── native-host/
+│   └── host.py                 # WebSocket server + native messaging host
+├── dist/                       # Built extension (load this in Chrome)
+├── install.py                  # One-step installer
+└── public/
+    └── manifest.json           # Chrome extension manifest
+```
+
+## App data
+
+Runtime files are stored in a `.webrig` directory:
+
+- **Windows:** `%LOCALAPPDATA%\.webrig`
+- **Linux:** `~/.local/share/.webrig`
+- **macOS:** `~/Library/Application Support/.webrig`
+
+Contains the native messaging manifest, wrapper script, and server logs.
